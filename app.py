@@ -5,6 +5,78 @@ from flask import Flask, g, jsonify, render_template, request
 
 app = Flask(__name__)
 
+# Asian currencies: (id, country, currency name, symbol, ISO code).
+# The id is usually the ISO code; Palestine shares ILS with Israel, so
+# it gets its own id. The currency is a label for the group, not a
+# conversion: amounts are entered and shown in the chosen currency,
+# never converted by rate.
+CURRENCIES = [
+    ("AFN", "Afghanistan", "Afghan afghani", "؋", "AFN"),
+    ("AMD", "Armenia", "Armenian dram", "֏", "AMD"),
+    ("AZN", "Azerbaijan", "Azerbaijani manat", "₼", "AZN"),
+    ("BHD", "Bahrain", "Bahraini dinar", ".د.ب", "BHD"),
+    ("BDT", "Bangladesh", "Bangladeshi taka", "৳", "BDT"),
+    ("BTN", "Bhutan", "Bhutanese ngultrum", "Nu.", "BTN"),
+    ("BND", "Brunei", "Brunei dollar", "$", "BND"),
+    ("KHR", "Cambodia", "Cambodian riel", "៛", "KHR"),
+    ("CNY", "China", "Chinese yuan", "¥", "CNY"),
+    ("EUR", "Cyprus", "Euro", "€", "EUR"),
+    ("GEL", "Georgia", "Georgian lari", "₾", "GEL"),
+    ("INR", "India", "Indian rupee", "₹", "INR"),
+    ("IDR", "Indonesia", "Indonesian rupiah", "Rp", "IDR"),
+    ("IRR", "Iran", "Iranian rial", "﷼", "IRR"),
+    ("IQD", "Iraq", "Iraqi dinar", "ع.د", "IQD"),
+    ("ILS", "Israel", "Israeli new shekel", "₪", "ILS"),
+    ("JPY", "Japan", "Japanese yen", "¥", "JPY"),
+    ("JOD", "Jordan", "Jordanian dinar", "د.ا", "JOD"),
+    ("KZT", "Kazakhstan", "Kazakhstani tenge", "₸", "KZT"),
+    ("KWD", "Kuwait", "Kuwaiti dinar", "د.ك", "KWD"),
+    ("KGS", "Kyrgyzstan", "Kyrgyzstani som", "сом", "KGS"),
+    ("LAK", "Laos", "Lao kip", "₭", "LAK"),
+    ("LBP", "Lebanon", "Lebanese pound", "ل.ل", "LBP"),
+    ("MYR", "Malaysia", "Malaysian ringgit", "RM", "MYR"),
+    ("MVR", "Maldives", "Maldivian rufiyaa", "Rf", "MVR"),
+    ("MNT", "Mongolia", "Mongolian tögrög", "₮", "MNT"),
+    ("MMK", "Myanmar", "Myanmar kyat", "K", "MMK"),
+    ("NPR", "Nepal", "Nepalese rupee", "₨", "NPR"),
+    ("KPW", "North Korea", "North Korean won", "₩", "KPW"),
+    ("OMR", "Oman", "Omani rial", "ر.ع.", "OMR"),
+    ("PKR", "Pakistan", "Pakistani rupee", "₨", "PKR"),
+    ("PSE", "Palestine", "Israeli new shekel", "₪", "ILS"),
+    ("PHP", "Philippines", "Philippine peso", "₱", "PHP"),
+    ("QAR", "Qatar", "Qatari riyal", "ر.ق", "QAR"),
+    ("RUB", "Russia", "Russian ruble", "₽", "RUB"),
+    ("SAR", "Saudi Arabia", "Saudi riyal", "ر.س", "SAR"),
+    ("SGD", "Singapore", "Singapore dollar", "$", "SGD"),
+    ("KRW", "South Korea", "South Korean won", "₩", "KRW"),
+    ("LKR", "Sri Lanka", "Sri Lankan rupee", "₨", "LKR"),
+    ("SYP", "Syria", "Syrian pound", "£", "SYP"),
+    ("TWD", "Taiwan", "New Taiwan dollar", "NT$", "TWD"),
+    ("TJS", "Tajikistan", "Tajikistani somoni", "SM", "TJS"),
+    ("THB", "Thailand", "Thai baht", "฿", "THB"),
+    ("USD", "Timor-Leste", "US dollar", "$", "USD"),
+    ("TRY", "Turkey", "Turkish lira", "₺", "TRY"),
+    ("TMT", "Turkmenistan", "Turkmenistani manat", "T", "TMT"),
+    ("AED", "United Arab Emirates", "UAE dirham", "د.إ", "AED"),
+    ("UZS", "Uzbekistan", "Uzbekistani som", "so'm", "UZS"),
+    ("VND", "Vietnam", "Vietnamese dong", "₫", "VND"),
+    ("YER", "Yemen", "Yemeni rial", "﷼", "YER"),
+]
+CURRENCY_IDS = {c[0] for c in CURRENCIES}
+
+
+def currency_for(currency_id):
+    for entry in CURRENCIES:
+        if entry[0] == (currency_id or "BDT"):
+            return {
+                "id": entry[0],
+                "country": entry[1],
+                "name": entry[2],
+                "symbol": entry[3],
+                "code": entry[4],
+            }
+    return currency_for("BDT")
+
 # Vercel's serverless filesystem is read-only except /tmp, so the
 # database lives there when deployed and beside the app locally.
 if os.environ.get("VERCEL"):
@@ -59,6 +131,13 @@ def init_db():
         );
         """
     )
+    # Groups created before currencies existed have no such column.
+    try:
+        db.execute(
+            "ALTER TABLE groups ADD COLUMN currency_id TEXT NOT NULL DEFAULT 'BDT'"
+        )
+    except sqlite3.OperationalError:
+        pass
     db.commit()
 
 
@@ -188,6 +267,7 @@ def group_detail(db, group):
     return {
         "id": group["id"],
         "name": group["name"],
+        "currency": currency_for(group["currency_id"] if "currency_id" in group.keys() else "BDT"),
         "members": [{"id": m["id"], "name": m["name"]} for m in members],
         "expenses": expenses,
         "balances": [
@@ -211,19 +291,39 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/currencies", methods=["GET"])
+def currencies():
+    return jsonify([currency_for(c[0]) for c in CURRENCIES])
+
+
 @app.route("/api/groups", methods=["GET", "POST"])
 def groups():
     db = get_db()
     if request.method == "POST":
         data = request.get_json(force=True, silent=True) or {}
         name = (data.get("name") or "").strip()
+        currency_id = (data.get("currency_id") or "BDT").strip().upper()
         if not name:
             return jsonify({"error": "group name is required"}), 400
-        cur = db.execute("INSERT INTO groups (name) VALUES (?)", (name,))
+        if currency_id not in CURRENCY_IDS:
+            return jsonify({"error": "unknown currency"}), 400
+        cur = db.execute(
+            "INSERT INTO groups (name, currency_id) VALUES (?, ?)",
+            (name, currency_id),
+        )
         db.commit()
-        return jsonify({"id": cur.lastrowid, "name": name}), 201
+        return jsonify({"id": cur.lastrowid, "name": name, "currency_id": currency_id}), 201
     rows = db.execute("SELECT * FROM groups ORDER BY id DESC").fetchall()
-    return jsonify([{"id": r["id"], "name": r["name"]} for r in rows])
+    return jsonify(
+        [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "currency": currency_for(r["currency_id"] if "currency_id" in r.keys() else "BDT"),
+            }
+            for r in rows
+        ]
+    )
 
 
 @app.route("/api/groups/<int:group_id>", methods=["GET"])
@@ -343,6 +443,8 @@ def vercel_dispatcher():
     parts = [p for p in original.split("/") if p]
     if not parts:
         return index()
+    if parts == ["api", "currencies"]:
+        return currencies()
     if parts == ["api", "groups"]:
         return groups()
     if len(parts) == 3 and parts[0] == "api" and parts[1] == "groups":

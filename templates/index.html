@@ -40,8 +40,10 @@
     <div class="row">
       <select id="groupSelect"></select>
       <input id="newGroup" placeholder="New group name, e.g. Hostel Room">
+      <select id="newGroupCurrency"></select>
       <button onclick="createGroup()">Create group</button>
     </div>
+    <p class="muted">Pick the group's currency when you create it — amounts are entered in that currency and are never converted.</p>
   </div>
 
   <div class="card" id="groupCard" style="display:none">
@@ -52,7 +54,7 @@
     </div>
     <p class="muted" id="memberList"></p>
 
-    <h2 style="margin-top:18px">Add expense (in ৳)</h2>
+    <h2 style="margin-top:18px" id="expHeading">Add expense</h2>
     <div class="row">
       <input id="expDesc" placeholder="What was it for?">
       <input id="expCategory" placeholder="Category (Food, Travel...)">
@@ -101,12 +103,16 @@ async function loadGroups() {
   const sel = $('groupSelect');
   sel.innerHTML = '<option value="">Choose a group...</option>' + groups.map(g => `<option value="${g.id}">${g.name}</option>`).join('');
   sel.onchange = () => { if (sel.value) loadGroup(sel.value); };
+  const currencies = await api('/api/currencies', 'GET');
+  const csel = $('newGroupCurrency');
+  csel.innerHTML = currencies.map(c => `<option value="${c.id}">${c.country} — ${c.name} (${c.symbol}, ${c.code})</option>`).join('');
+  csel.value = 'BDT';
 }
 
 async function createGroup() {
   const name = $('newGroup').value.trim();
   if (!name) return;
-  const g = await api('/api/groups', 'POST', { name });
+  const g = await api('/api/groups', 'POST', { name, currency_id: $('newGroupCurrency').value });
   $('newGroup').value = '';
   await loadGroups();
   $('groupSelect').value = g.id;
@@ -115,19 +121,21 @@ async function createGroup() {
 
 async function loadGroup(id) {
   currentGroup = await api('/api/groups/' + id, 'GET');
+  const S = currentGroup.currency.symbol;
   $('groupCard').style.display = 'block';
-  $('groupTitle').textContent = currentGroup.name;
+  $('groupTitle').textContent = `${currentGroup.name} — ${currentGroup.currency.country} (${S}, ${currentGroup.currency.code})`;
+  $('expHeading').textContent = `Add expense (in ${S} ${currentGroup.currency.code})`;
   $('memberList').textContent = 'Members: ' + (currentGroup.members.map(m => m.name).join(', ') || 'none yet');
   $('expPayer').innerHTML = currentGroup.members.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
   $('participants').innerHTML = '<p class="muted">Shared by (untick anyone not part of this expense):</p>' + currentGroup.members.map(m =>
     `<label><input type="checkbox" data-participant="${m.id}" checked> ${m.name}</label> `).join('');
   renderCustom();
-  $('balanceRows').innerHTML = currentGroup.balances.map(b => `<tr><td>${b.name}</td><td>৳${b.paid}</td><td>৳${b.share}</td><td class="${parseFloat(b.balance) >= 0 ? 'pos' : 'neg'}">৳${b.balance}</td></tr>`).join('');
+  $('balanceRows').innerHTML = currentGroup.balances.map(b => `<tr><td>${b.name}</td><td>${S}${b.paid}</td><td>${S}${b.share}</td><td class="${parseFloat(b.balance) >= 0 ? 'pos' : 'neg'}">${S}${b.balance}</td></tr>`).join('');
   $('settlements').innerHTML = currentGroup.settlements.length
-    ? currentGroup.settlements.map(s => `<div class="settle">${s.from} pays ${s.to} <b>৳${s.amount}</b></div>`).join('')
+    ? currentGroup.settlements.map(s => `<div class="settle">${s.from} pays ${s.to} <b>${S}${s.amount}</b></div>`).join('')
     : '<p class="muted">Everyone is settled.</p>';
   $('expenseList').innerHTML = currentGroup.expenses.length
-    ? currentGroup.expenses.map(e => `<p><b>${e.description || 'Expense'}</b> — ৳${e.amount} paid by ${e.payer} (${e.category})<br><span class="muted">Shares: ${e.shares.map(s => `${s.name} ৳${s.amount}`).join(', ')}</span></p>`).join('')
+    ? currentGroup.expenses.map(e => `<p><b>${e.description || 'Expense'}</b> — ${S}${e.amount} paid by ${e.payer} (${e.category})<br><span class="muted">Shares: ${e.shares.map(s => `${s.name} ${S}${s.amount}`).join(', ')}</span></p>`).join('')
     : '<p class="muted">No expenses yet.</p>';
   drawChart();
 }
@@ -178,8 +186,8 @@ function drawChart() {
     data: {
       labels: currentGroup.balances.map(b => b.name),
       datasets: [
-        { label: 'Paid (৳)', data: currentGroup.balances.map(b => parseFloat(b.paid)), backgroundColor: '#059669' },
-        { label: 'Share (৳)', data: currentGroup.balances.map(b => parseFloat(b.share)), backgroundColor: '#0d9488' }
+        { label: `Paid (${currentGroup.currency.symbol})`, data: currentGroup.balances.map(b => parseFloat(b.paid)), backgroundColor: '#059669' },
+        { label: `Share (${currentGroup.currency.symbol})`, data: currentGroup.balances.map(b => parseFloat(b.share)), backgroundColor: '#0d9488' }
       ]
     },
     options: { responsive: true, scales: { y: { beginAtZero: true } } }
