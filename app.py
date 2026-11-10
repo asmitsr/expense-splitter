@@ -2,8 +2,34 @@ import os
 import sqlite3
 
 from flask import Flask, g, jsonify, render_template, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
+
+
+def _rate_limit_key():
+    """Client IP for rate limiting.
+
+    Prefer X-Forwarded-For (set by Vercel's edge) so each visitor gets
+    their own bucket; fall back to the direct remote address locally.
+    """
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return get_remote_address()
+
+
+# Rate limiting (Flask-Limiter, in-memory storage).
+# On Vercel serverless the storage is per-instance and resets on cold
+# start — acceptable for this low-traffic tool; it still blunts bursts
+# and abuse from a single IP within an instance's lifetime.
+limiter = Limiter(
+    key_func=_rate_limit_key,
+    app=app,
+    default_limits=["60 per minute"],
+    storage_uri="memory://",
+)
 
 # Asian currencies: (id, country, currency name, symbol, ISO code).
 # The id is usually the ISO code; Palestine shares ILS with Israel, so
@@ -297,6 +323,7 @@ def currencies():
 
 
 @app.route("/api/groups", methods=["GET", "POST"])
+@limiter.limit("10 per minute", methods=["POST"])
 def groups():
     db = get_db()
     if request.method == "POST":
@@ -336,6 +363,7 @@ def one_group(group_id):
 
 
 @app.route("/api/groups/<int:group_id>/members", methods=["POST"])
+@limiter.limit("10 per minute")
 def add_member(group_id):
     db = get_db()
     group, err = group_or_404(db, group_id)
@@ -353,6 +381,7 @@ def add_member(group_id):
 
 
 @app.route("/api/groups/<int:group_id>/expenses", methods=["POST"])
+@limiter.limit("10 per minute")
 def add_expense(group_id):
     db = get_db()
     group, err = group_or_404(db, group_id)
@@ -462,6 +491,14 @@ def vercel_dispatcher():
         if parts[3] == "expenses" and request.method == "POST":
             return add_expense(gid)
     return jsonify({"error": "not found"}), 404
+
+
+@app.errorhandler(429)
+def _ratelimited(e):
+    return (
+        jsonify({"error": "Too many requests. Please wait a minute and try again."}),
+        429,
+    )
 
 
 if __name__ == "__main__":
